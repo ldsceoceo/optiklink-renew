@@ -1,0 +1,12 @@
+# 登录态与录制（含真实 Cookie），永远不进仓库
+slim-storage-state.json
+storage-state*.json
+agentscribe-*.js
+agentscribe-*.json
+tmp/
+screenshots/
+output/
+sing-box
+sing-box.log
+sing-box-config.json
+__pycache__/
