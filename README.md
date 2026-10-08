@@ -19,18 +19,19 @@
 
 | Secret 名称 | 必填 | 说明 |
 |------------|------|------|
-| `OPTIKLINK_STATE` | ✅ | storageState 登录态 JSON 全文（须含 `optiklink.net` + `discord.com` 两个域会话；超长可转 base64，脚本自动识别） |
+| `OPTIKLINK_STATE` | ✅ | 三选一：storageState JSON 全文 / base64（含 discord 会话则重登可自愈），或**单 cookie** `PHPSESSID=xxx`/裸值（最简） |
 | `OPTIKLINK_ACCOUNT` | ❌ | 账号备注，仅 TG 展示用 |
 | `NODE_LINK` | ❌ | 代理链接，不配则直连（与 eooce 同源 `setup_proxy.sh`） |
 | `TG_BOT_TOKEN` / `TG_CHAT_ID` | ❌ | Telegram 通知 |
 
-### OPTIKLINK_STATE 获取
+### OPTIKLINK_STATE 获取（推荐单 cookie，最简）
 
-1. 本地 Chrome **用同一个 profile 先登 Discord**（discord.com 保持登录态），再访问 `https://optiklink.net/auth` 点登录，完成算术题（人工一次过掉）；
-2. 用 Playwright 导出 storageState：`await context.storageState({ path: 'state.json' })`；
-3. JSON 全文贴进 Secret（或 `base64` 后贴入）。Cookie 失效时脚本 TG 告警，重抓一次即可。
+主站会话就是 `PHPSESSID`（无 remember_web 机制，CF 走浏览器活解，不靠拷 clearance）：
 
-> ⚠️ 导出时浏览器必须**同时登着 Discord**：storageState 缺 `discord.com` 会话会导致重登轨无法静默授权（脚本会明确告警，不硬闯）。录制导出的 `agentscribe-shield-auth-*.json` 经查只有 optiklink 域 cookie，Cookie 直进有效、重登自愈无效——建议重导一份含 Discord 会话的。
+1. 本地 Chrome 登录状态下按 F12 → Application → Cookies → `https://optiklink.net` → 复制 `PHPSESSID` 的值；
+2. Secret 填 `PHPSESSID=xxx` 或裸值，二选一贴进去就行。
+
+> 需要重登自愈（Cookie 过期后浏览器自动走 Discord 静默重登）才用 storageState 全文：导出时浏览器 profile 须**同时登着 Discord**（storageState 须含 `discord.com` 会话），超长可 base64。否则缺 discord 会话时重登轨只会明确告警，不硬闯。
 
 ## 登录流程（已录制验证）
 

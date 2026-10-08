@@ -5,7 +5,8 @@
 # 平台逻辑按 2026-10-08 AgentScribe 录制 SOP（session 764f4445）：
 #   /auth 点登录 → discord OAuth prompt=none 静默 → /login 算术题 + Turnstile → POST /login → 跳 / 即登录
 # TOS：免费用户每 3 天必须登录一次主站，否则离线，7 天删机。本脚本每 2 天跑一次，登录即保活。
-# Secrets：OPTIKLINK_STATE（storageState 全文或 base64，含 optiklink.net + discord.com 会话）必填
+# Secrets：OPTIKLINK_STATE 三选一：storageState 全文/base64（含 discord 会话则重登可自愈），
+#          或单 cookie `PHPSESSID=xxx`/裸值（最简，F12 拷一个值就行；主站无 remember_web 机制）必填
 #          OPTIKLINK_ACCOUNT（备注，仅 TG 展示）可选，TG_BOT_TOKEN/TG_CHAT_ID 可选，NODE_LINK 可选
 
 import os, re, sys, time, json, base64, random, tempfile, requests
@@ -314,15 +315,31 @@ def solve_modal_turnstile(page, timeout=90):
 # ================== OptikLink 平台逻辑（按录制 SOP） ==================
 
 def _write_state_file():
-    """OPTIKLINK_STATE（storageState JSON 或 base64）归一化后落盘，供 new_context 注入。
+    """OPTIKLINK_STATE 三种形态归一化后落盘，供 new_context 注入：
+    1) storageState JSON / base64（含多域会话，重登轨可自愈）；
+    2) 单 cookie：`PHPSESSID=xxx` 或裸值（主站会话即 PHPSESSID，无 remember_web 机制，CF 走浏览器活解）。
     兼容浏览器直接导出的 cookie 形状：expirationDate→expires，非法 sameSite 丢弃，未知键剔除。"""
-    raw = (OPTIKLINK_STATE or "").strip()
+    raw = (OPTIKLINK_STATE or "").strip().strip('"').strip("'")
     if not raw:
         return None
     try:
-        data = raw
-        if not raw.lstrip().startswith("{"):
+        if raw.lstrip().startswith("{"):
+            data = raw
+        elif len(raw) > 500:
+            # 长串非 JSON → 视为 base64 的 storageState
             data = base64.b64decode(raw).decode("utf-8")
+        else:
+            # 短串 → 单 cookie（PHPSESSID=xxx 或裸值）
+            val = raw.split("=", 1)[1].strip() if "=" in raw else raw
+            val = val.strip().strip('"').strip("'").split(";")[0].strip()
+            if not val:
+                log("❌ OPTIKLINK_STATE 单 cookie 值为空")
+                return None
+            norm = {"cookies": [{
+                "name": "PHPSESSID", "value": val, "domain": "optiklink.net", "path": "/",
+                "expires": -1, "httpOnly": False, "secure": False, "sameSite": "None",
+            }], "origins": []}
+            return _dump_state_file(norm)
         state = json.loads(data)
         norm_cookies = []
         for c in state.get("cookies", []) if isinstance(state, dict) else []:
@@ -342,18 +359,22 @@ def _write_state_file():
                 "secure": bool(c.get("secure", False)), "sameSite": ss,
             })
         norm_cookies = [c for c in norm_cookies if c.get("domain")]
-        norm = {"cookies": norm_cookies, "origins": state.get("origins", []) if isinstance(state, dict) else []}
         if not norm_cookies:
             log("❌ OPTIKLINK_STATE 里没有可用 cookie")
             return None
-        fd, path = tempfile.mkstemp(suffix=".json", prefix="optiklink-state-")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(norm, f)
-        log(f"📇 登录态已载入 {len(norm_cookies)} 个 cookie")
-        return path
+        return _dump_state_file({"cookies": norm_cookies,
+                                 "origins": state.get("origins", []) if isinstance(state, dict) else []})
     except Exception as e:
         log(f"❌ OPTIKLINK_STATE 解析失败: {e}")
         return None
+
+
+def _dump_state_file(norm):
+    fd, path = tempfile.mkstemp(suffix=".json", prefix="optiklink-state-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(norm, f)
+    log(f"📇 登录态已载入 {len(norm['cookies'])} 个 cookie")
+    return path
 
 def open_browser(p, state_path=None):
     """启动浏览器（eooce 原样，storageState 注入登录态）"""
