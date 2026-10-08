@@ -46,6 +46,7 @@ jobs:
         env:
           OPTIKLINK_STATE: ${{ secrets.OPTIKLINK_STATE }}
           OPTIKLINK_ACCOUNT: ${{ secrets.OPTIKLINK_ACCOUNT }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py

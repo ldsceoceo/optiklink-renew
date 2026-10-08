@@ -27,12 +27,23 @@ if sys.platform == 'win32':
 # --- 环境变量 ---
 OPTIKLINK_STATE   = os.environ.get('OPTIKLINK_STATE') or ""
 OPTIKLINK_ACCOUNT = os.environ.get('OPTIKLINK_ACCOUNT') or "cookie-account"
+DISCORD_TOKEN     = os.environ.get('DISCORD_TOKEN') or ""  # 可选：第三 fallback，静默 OAuth 失败时换 code
 TG_CHAT_ID        = os.environ.get('TG_CHAT_ID') or ""
 TG_BOT_TOKEN      = os.environ.get('TG_BOT_TOKEN') or ""
 
 BASE_URL  = "https://optiklink.net"
 AUTH_URL  = f"{BASE_URL}/auth"
 LOGIN_URL = f"{BASE_URL}/login"
+
+# Discord OAuth（录制实测 client_id；redirect 用 .com，服务端会跳回 .net）
+DISCORD_CLIENT_ID    = "933437142254887052"
+DISCORD_REDIRECT_URI = "https://optiklink.com/login"
+DISCORD_OAUTH_URL    = (
+    "https://discord.com/api/v9/oauth2/authorize"
+    f"?client_id={DISCORD_CLIENT_ID}&response_type=code"
+    "&scope=guilds+guilds.join+identify+email"
+    f"&redirect_uri={DISCORD_REDIRECT_URI}"
+)
 
 # --- 代理配置（由工作流 setup_proxy.sh 写入 $GITHUB_ENV）---
 IS_PROXY         = os.environ.get('IS_PROXY', 'false').lower() == 'true'
@@ -442,6 +453,51 @@ def solve_math_question(page):
         log(f"❌ 算术题处理失败: {e}")
         return False
 
+def discord_token_login(page):
+    """第三 fallback：DISCORD_TOKEN 调 Discord OAuth 授权接口换 code，跟回调把 optiklink 会话写入 context。
+    思路来自废仓 v1（纯 HTTP 版），此处用 Playwright request（与浏览器同 cookie  jar）。
+    注意：token 等同密码，日志绝不打印全文；Discord 可能因风控/2FA 拒绝，失败即回 False。"""
+    if not DISCORD_TOKEN:
+        log("❌ 未配置 DISCORD_TOKEN，无法重登（请更新 OPTIKLINK_STATE 或配置 token）")
+        return False
+    log("🔄 正在通过 Discord Token 执行 OAuth 重登...")
+    try:
+        api = page.context.request
+        r = api.post(
+            DISCORD_OAUTH_URL,
+            headers={"Authorization": DISCORD_TOKEN, "Content-Type": "application/json",
+                      "User-Agent": DEFAULT_UA},
+            data={"permissions": "0", "authorize": True},
+            timeout=25000,
+        )
+        if r.status != 200:
+            log(f"❌ Discord 授权失败: HTTP {r.status}（token 失效/被风控/需人工验证）")
+            return False
+        try:
+            loc = r.json().get("location")
+        except Exception:
+            loc = None
+        if not loc:
+            log("❌ Discord 未返回回调 location")
+            return False
+        url = loc
+        for _ in range(10):
+            try:
+                g = api.get(url, headers={"User-Agent": DEFAULT_UA}, timeout=25000)
+            except Exception as e:
+                log(f"❌ 回调跳转异常: {e}")
+                return False
+            nxt = g.headers.get("location")
+            if g.status in (301, 302, 303, 307, 308) and nxt:
+                url = nxt
+                continue
+            break
+        log("✅ Discord Token 回调完成，会话已写入 context")
+        return True
+    except Exception as e:
+        log(f"❌ Discord Token 重登异常: {e}")
+        return False
+
 def login(page):
     # 1. Cookie 登录尝试（storageState 已在 context 注入）
     log("📇 尝试 Cookie 登录...")
@@ -473,17 +529,16 @@ def login(page):
             page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=45000)
         except Exception:
             pass
-        if 'discord.com/login' in (page.url or ''):
-            log("❌ 落到 Discord 账密页（会话过期），请更新 OPTIKLINK_STATE")
-            page.screenshot(path="discord_login_required.png")
-            return False
-        if 'discord.com/oauth2' in (page.url or ''):
-            log("⏳ Discord 授权页，等待自动回跳...")
+        if 'discord.com' in (page.url or ''):
+            log("⚠️ 仍在 Discord（静默授权失败），尝试 Token 重登...")
             try:
-                page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=30000)
+                page.screenshot(path="discord_login_required.png")
             except Exception:
-                log("❌ Discord OAuth 未回跳")
+                pass
+            if not discord_token_login(page):
                 return False
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2)
         if '/login' not in (page.url or ''):
             # 可能已直接登录成功
             if _is_logged_in(page):
@@ -522,13 +577,14 @@ def login(page):
         return False
 
 def main():
-    log(f"🔍 凭证检测: OPTIKLINK_STATE={'已配置' if OPTIKLINK_STATE else '未配置'}")
-    if not OPTIKLINK_STATE:
-        log("❌ 缺少 OPTIKLINK_STATE（storageState 登录态）")
+    log(f"🔍 凭证检测: OPTIKLINK_STATE={'已配置' if OPTIKLINK_STATE else '未配置'}, "
+        f"DISCORD_TOKEN={'已配置' if DISCORD_TOKEN else '未配置'}")
+    if not OPTIKLINK_STATE and not DISCORD_TOKEN:
+        log("❌ 缺少登录凭证（OPTIKLINK_STATE / DISCORD_TOKEN 至少配一个）")
         sys.exit(1)
 
-    state_path = _write_state_file()
-    if not state_path:
+    state_path = _write_state_file() if OPTIKLINK_STATE else None
+    if OPTIKLINK_STATE and not state_path:
         sys.exit(1)
 
     with sync_playwright() as p:
