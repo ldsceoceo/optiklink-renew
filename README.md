@@ -37,13 +37,13 @@
 ## 登录流程（已录制验证）
 
 ```
-/auth 点登录 → discord.com/oauth2/authorize（prompt=none 静默）
+/auth 点登录 → Discord 验证（已授权则 prompt=none 静默回跳，否则滚动条款点 Authorize）
   → /login：读 p.math-question strong → 计算 → 填 math_answer
   → Turnstile（一般自过，不过则自动点）→ 点 CONTINUE WITH LOGIN
-  → POST /login → 跳 optiklink.net/（PHPSESSID 即登录态）
+  → POST /login → 跳 optiklink.net/ Dashboard（Welcome…to your Dashboard + Sincerely + Logout 即成功）
 ```
 
-若落到 `discord.com/login` 账密页（Discord 会话过期），脚本直接失败 + TG 告警，不硬填账密。
+若卡在 Discord 授权/账密页，先试 Token 重登（配了 `DISCORD_TOKEN` 的话），仍失败则 TG 告警，不硬填账密。
 
 ## Telegram 通知示例
 

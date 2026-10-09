@@ -3,7 +3,7 @@
 # OptikLink 主站保活（eooce 基座版，单账号）
 # 骨架复刻 eooce/Auto-Renew-HidenCloud：patchright 反检测 + CF 全套 + sing-box 代理 + TG 通知
 # 平台逻辑按 2026-10-08 AgentScribe 录制 SOP（session 764f4445）：
-#   /auth 点登录 → discord OAuth prompt=none 静默 → /login 算术题 + Turnstile → POST /login → 跳 / 即登录
+#   /auth 点登录 → Discord 验证（静默回跳 / 点 Authorize）→ /login 算术题 + Turnstile → POST /login → 跳 / Dashboard
 # TOS：免费用户每 3 天必须登录一次主站，否则离线，7 天删机。本脚本每 2 天跑一次，登录即保活。
 # Secrets：OPTIKLINK_STATE 三选一：storageState 全文/base64（含 discord 会话则重登可自愈），
 #          或单 cookie `PHPSESSID=xxx`/裸值（最简，F12 拷一个值就行；主站无 remember_web 机制）必填
@@ -404,20 +404,41 @@ def open_browser(p, state_path=None):
     page.add_init_script(STEALTH_JS)
     return browser, page
 
+def _dashboard_body(page):
+    """取当前页正文（登录判定与用户名提取共用）"""
+    try:
+        return page.locator("body").inner_text(timeout=8000) or ""
+    except Exception:
+        return ""
+
 def _is_logged_in(page):
-    """是否处于登录后的主站状态（录制：登录成功落到 optiklink.net/；兼容 .com 同源跳转）"""
+    """阳性判定（录制实测 grounding）：
+    networkEvents[63] GET / 200 响应体即登录态 Dashboard，含 "to your Dashboard"（Welcome 行）、
+    "Sincerely provided by"（页脚）、"Logout"/"Login to Panel"（侧栏）；
+    匿名 /home 对四者全是 0 命中。要求 A 组 × B 组各中其一，零误报。
+    匿名访问 / 会 302 到 /home，纯 URL 判定一律视为未登录。"""
     try:
         url = page.url or ''
         if 'optiklink.net' not in url and 'optiklink.com' not in url:
             return False
         if '/login' in url or '/auth' in url or _is_security_check_page(page):
             return False
-        return True
+        body = _dashboard_body(page)
+        return (("to your Dashboard" in body or "Sincerely provided by" in body)
+                and ("Logout" in body or "Login to Panel" in body))
     except Exception:
         return False
 
+def _get_dashboard_user(page):
+    """右上角 Discord 用户名（如 lds924494#0），用于 TG 实名展示；拿不到返回空"""
+    try:
+        m = re.search(r'([A-Za-z0-9_.]{2,32}#\d+)', _dashboard_body(page))
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
 def _dismiss_ads(page):
-    """关 Google vignette/广告遮罩（SOP Step 1，不阻塞）"""
+    """关广告遮罩 + Google Funding Choices 同意弹窗（SOP Step 1；后者会盖住登录链接，不阻塞）"""
     for sel in ('#ad_position_box', '[aria-label="Close ad"]', '.close-ad'):
         try:
             el = page.locator(sel).first
@@ -427,12 +448,22 @@ def _dismiss_ads(page):
                 break
         except Exception:
             continue
+    for text in ("Consent", "同意", "Accept all", "全部接受", "Accept", "接受", "Allow all"):
+        try:
+            btn = page.locator(f'button:has-text("{text}"):visible').first
+            if btn.count() > 0:
+                btn.click(timeout=3000)
+                log(f"🖱️ 已关闭同意弹窗（{text}）")
+                time.sleep(1)
+                return
+        except Exception:
+            continue
 
 def solve_math_question(page):
     """解 /login 页算术题：读 p.math-question strong → 计算 → 填 math_answer"""
     try:
         q_el = page.locator(MATH_Q_SELECTOR).first
-        q_el.wait_for(state="visible", timeout=20000)
+        q_el.wait_for(state="visible", timeout=60000)
         q_text = (q_el.inner_text() or "").strip()
         log(f"🧮 题目: {q_text}")
         m = re.search(r'(\d+)\s*([+\-×*/xX÷])\s*(\d+)', q_text)
@@ -451,6 +482,45 @@ def solve_math_question(page):
         return True
     except Exception as e:
         log(f"❌ 算术题处理失败: {e}")
+        return False
+
+def _discord_oauth_authorize(page, timeout=120):
+    """Discord 授权页处理（正常流程第 2 步）：
+    已授权过的会话走 prompt=none 静默回跳；没点过授权的会话停在授权页，需滚动条款到底并点击 Authorize。
+    代理链路慢，各步都等足。"""
+    try:
+        page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=45000)
+        log("✅ Discord 已静默授权，无需手动点击")
+        return True
+    except Exception:
+        pass
+    if '/oauth2/' not in (page.url or ''):
+        return False
+    log("🔘 Discord 授权页，尝试点击 Authorize...")
+    try:
+        page.evaluate("""() => {
+            const s = document.querySelector('[class*=scroller]') || document.querySelector('[class*=scrollerBase]');
+            if (s) s.scrollTop = s.scrollHeight;
+            window.scrollTo(0, document.body.scrollHeight);
+        }""")
+        time.sleep(1)
+    except Exception:
+        pass
+    for sel in ('button:has-text("Authorize")', 'button:has-text("授权")', 'button[type="submit"]'):
+        try:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(timeout=8000)
+                log(f"✅ 已点击 Discord 授权按钮（{sel}）")
+                break
+        except Exception:
+            continue
+    try:
+        page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=timeout)
+        log("✅ Discord 授权完成，已回跳验证页")
+        return True
+    except Exception:
+        log("❌ Discord 授权后未回跳")
         return False
 
 def discord_token_login(page):
@@ -498,6 +568,49 @@ def discord_token_login(page):
         log(f"❌ Discord Token 重登异常: {e}")
         return False
 
+def _do_verification(page):
+    """验证页尾巴（各路复用）：等题目 → 算术 → Turnstile → 提交 → 轮询 Dashboard"""
+    if '/login' not in (page.url or ''):
+        # 回调跳转经代理可能慢，给 60s 再判；可能已直接登录成功
+        try:
+            page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=60000)
+        except Exception:
+            pass
+        if '/login' not in (page.url or ''):
+            if _is_logged_in(page):
+                log("✅ 已直接登录成功")
+                return True
+            log(f"❌ 未到达验证页，当前: {page.url}")
+            return False
+    log(f"✅ 到达验证页: {page.url}")
+
+    if not solve_math_question(page):
+        page.screenshot(path="math_fail.png")
+        return False
+
+    if not solve_modal_turnstile(page, timeout=90):
+        log("⚠️ Turnstile 未确认通过，仍将尝试提交...")
+
+    log("🖱️ 点击 CONTINUE WITH LOGIN...")
+    page.locator(SUBMIT_SELECTOR).first.click(timeout=10000)
+    try:
+        page.wait_for_url(re.compile(r'optiklink\.(net|com)/(#.*)?$'), timeout=60000)
+    except Exception:
+        pass
+    # 提交后会话落定可能滞后，轮询标记最长 60s 再判
+    logged = False
+    for _ in range(20):
+        time.sleep(3)
+        if _is_logged_in(page):
+            logged = True
+            break
+    if logged:
+        log("✅ 登录成功！")
+        return True
+    log(f"❌ 提交后未登录，当前: {page.url}")
+    page.screenshot(path="login_fail.png")
+    return False
+
 def login(page):
     # 1. Cookie 登录尝试（storageState 已在 context 注入）
     log("📇 尝试 Cookie 登录...")
@@ -512,7 +625,27 @@ def login(page):
     except Exception as e:
         log(f"⚠️ Cookie 登录尝试异常: {e}")
 
-    # 2. 浏览器重登：/auth → Discord 静默 OAuth → /login 算术题 → 提交
+    # 2. Token 直换（有 token 时优先：纯 API 换 code，不点页面、不碰 discord.com 页面）
+    if DISCORD_TOKEN:
+        log("🎫 有 DISCORD_TOKEN，走纯 API 换 code（跳过页面点击）...")
+        if discord_token_login(page):
+            try:
+                page.goto(f"{BASE_URL}/", wait_until="domcontentloaded", timeout=60000)
+                time.sleep(3)
+            except Exception as e:
+                log(f"⚠️ 回跳后访问异常: {e}")
+            if _is_logged_in(page):
+                log("✅ Token 换会话后已直接登录")
+                return True
+            try:
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                log(f"⚠️ 打开验证页异常: {e}")
+                return False
+            return _do_verification(page)
+        log("⚠️ Token 换 code 失败，转页面点击流程...")
+
+    # 3. 页面点击流程：/auth → Discord 验证（静默/点 Authorize）→ 验证页
     try:
         log("🔑 打开 OptikLink 登录页...")
         page.goto(AUTH_URL, wait_until="domcontentloaded", timeout=60000)
@@ -521,53 +654,79 @@ def login(page):
         _dismiss_ads(page)
 
         log("📤 点击登录（Sign in with Discord）...")
-        page.locator(LOGIN_LINK_SELECTOR).first.click(timeout=15000)
-        time.sleep(3)
-
-        # 等待 Discord OAuth 回跳：正常走 prompt=none 静默授权回到 /login（.com 会再跳回 .net）
-        try:
-            page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=45000)
-        except Exception:
-            pass
-        if 'discord.com' in (page.url or ''):
-            log("⚠️ 仍在 Discord（静默授权失败），尝试 Token 重登...")
+        clicked = False
+        for attempt in range(4):
             try:
-                page.screenshot(path="discord_login_required.png")
+                _dismiss_ads(page)
+                link = page.locator(LOGIN_LINK_SELECTOR).first
+                link.wait_for(state="visible", timeout=10000)
+                try:
+                    link.click(timeout=6000, no_wait_after=True)
+                except Exception:
+                    link.click(timeout=6000, force=True, no_wait_after=True)
+                clicked = True
+                break
+            except Exception as e:
+                log(f"⚠️ 第 {attempt + 1} 次点击未完成，重试...（{str(e)[:100]}）")
+                time.sleep(2)
+        if not clicked:
+            log("❌ 多次点击登录链接失败（广告跳转干扰）")
+            page.screenshot(path="login_fail.png")
+            return False
+        # 点击后等跳转：盯主页面 URL + 新弹出的 popup（站点的 Discord 跳转可能开新页）
+        # 广告页可能吞点击/跳广告页再回来；代理链路慢，等足 90s
+        log("⏳ 等待跳转（最长 90s）...")
+        jumped = False
+        for _ in range(30):
+            time.sleep(3)
+            u = page.url or ''
+            if '/login' in u or 'discord.com' in u or '/auth' not in u:
+                jumped = True
+                break
+            try:
+                if len(page.context.pages) > 1:
+                    for p in page.context.pages:
+                        if p != page and ('discord.com' in (p.url or '') or 'login' in (p.url or '')):
+                            log(f"📑 检测到弹出页：{p.url}，切换过去")
+                            page = p
+                            jumped = True
+                            break
+                    if jumped:
+                        break
             except Exception:
                 pass
-            if not discord_token_login(page):
-                return False
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(2)
+        if not jumped:
+            log("❌ 点击后未跳转（仍在 /auth），点击可能被广告吞掉")
+            page.screenshot(path="login_fail.png")
+            return False
+
+        # 正常流程第 2 步：Discord 验证（静默回跳 → 点 Authorize → 账密页走 token）
+        if 'discord.com' in (page.url or ''):
+            authed = False
+            if '/oauth2/' in (page.url or ''):
+                authed = _discord_oauth_authorize(page)
+            if not authed:
+                log("⚠️ Discord 未完成授权，尝试 Token 重登...")
+                try:
+                    page.screenshot(path="discord_login_required.png")
+                except Exception:
+                    pass
+                if not discord_token_login(page):
+                    return False
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+                # 回调落地 + 验证页渲染经代理可能很慢，等题目出现
+                try:
+                    page.locator(MATH_Q_SELECTOR).first.wait_for(state="visible", timeout=60000)
+                except Exception:
+                    pass
+                time.sleep(2)
         if '/login' not in (page.url or ''):
-            # 可能已直接登录成功
-            if _is_logged_in(page):
-                log("✅ 已直接登录成功")
-                return True
-            log(f"❌ 未到达验证页，当前: {page.url}")
-            return False
-        log(f"✅ 到达验证页: {page.url}")
-
-        if not solve_math_question(page):
-            page.screenshot(path="math_fail.png")
-            return False
-
-        if not solve_modal_turnstile(page, timeout=90):
-            log("⚠️ Turnstile 未确认通过，仍将尝试提交...")
-
-        log("🖱️ 点击 CONTINUE WITH LOGIN...")
-        page.locator(SUBMIT_SELECTOR).first.click(timeout=10000)
-        try:
-            page.wait_for_url(re.compile(r'optiklink\.(net|com)/(#.*)?$'), timeout=30000)
-        except Exception:
-            pass
-        time.sleep(2)
-        if _is_logged_in(page):
-            log("✅ 浏览器重登成功！")
-            return True
-        log(f"❌ 提交后未登录，当前: {page.url}")
-        page.screenshot(path="login_fail.png")
-        return False
+            # 回调跳转经代理可能慢，给 60s 再判；可能已直接登录成功
+            try:
+                page.wait_for_url(re.compile(r'optiklink\.(net|com)/login'), timeout=60000)
+            except Exception:
+                pass
+        return _do_verification(page)
     except Exception as e:
         log(f"❌ 登录异常: {e}")
         try:
@@ -602,7 +761,11 @@ def main():
                 page.screenshot(path="dashboard.png")
             except Exception:
                 pass
-            status = "✅ 保活成功" if ok else "❌ 保活失败（Cookie 失效或验证未通过，请更新 OPTIKLINK_STATE）"
+            who = _get_dashboard_user(page) if ok else ""
+            if ok:
+                status = f"✅ 保活成功（Dashboard：{who or OPTIKLINK_ACCOUNT}）"
+            else:
+                status = "❌ 保活失败（未检测到 Dashboard，请更新 OPTIKLINK_STATE）"
             log(status)
             send_telegram_notification(status, current_ip)
             sys.exit(0 if ok else 1)
