@@ -20,7 +20,7 @@
 | Secret 名称 | 必填 | 说明 |
 |------------|------|------|
 | `OPTIKLINK_STATE` | 二选一 | 三选一：storageState JSON 全文 / base64（含 discord 会话则重登可自愈），或**单 cookie** `PHPSESSID=xxx`/裸值（最简） |
-| `DISCORD_TOKEN` | 二选一 | 第三 fallback：Cookie+静默全挂时换 OAuth code（**未实跑验证**，且有封号风险，尽量别用） |
+| `DISCORD_TOKEN` | 二选一 | 第三 fallback：Cookie+静默全挂时换 OAuth code（2026-10-09 CI 已验证全链路；token 有过期/封号风险，失效时 TG 告警重抓） |
 | `OPTIKLINK_ACCOUNT` | ❌ | 账号备注，仅 TG 展示用 |
 | `NODE_LINK` | ❌ | 代理链接，不配则直连（与 eooce 同源 `setup_proxy.sh`） |
 | `TG_BOT_TOKEN` / `TG_CHAT_ID` | ❌ | Telegram 通知 |
